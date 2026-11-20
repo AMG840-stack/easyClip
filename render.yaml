@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: vibra-clip-engine
+    runtime: docker
+    plan: standard
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: WHISPER_MODEL
+        value: small
+      - key: APP_PASSWORD
+        sync: false
