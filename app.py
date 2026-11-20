@@ -14,6 +14,19 @@ app = FastAPI(title="VIBRA CLIP ENGINE")
 sec = HTTPBasic(auto_error=False)
 JOBS, LOCK, _model = {}, threading.Semaphore(1), None
 
+def _cleanup_loop():
+    import time
+    while True:
+        time.sleep(3600)
+        now = time.time()
+        for d in ROOT.iterdir():
+            try:
+                if d.is_dir() and now - d.stat().st_mtime > 86400:
+                    shutil.rmtree(d, ignore_errors=True); JOBS.pop(d.name, None)
+            except Exception:
+                pass
+threading.Thread(target=_cleanup_loop, daemon=True).start()
+
 def auth(c: HTTPBasicCredentials = Depends(sec)):
     if PASSWORD and (not c or not secrets.compare_digest(c.password, PASSWORD)):
         raise HTTPException(401, headers={"WWW-Authenticate": "Basic"})
@@ -31,7 +44,7 @@ def transcribe(wav):
     global _model
     from faster_whisper import WhisperModel
     if _model is None: _model = WhisperModel(WHISPER, device="cpu", compute_type="int8")
-    segs, info = _model.transcribe(str(wav), word_timestamps=True, vad_filter=True)
+    segs, info = _model.transcribe(str(wav), word_timestamps=True, vad_filter=True, beam_size=int(os.getenv("WHISPER_BEAM", "1")))
     out = []
     for s in segs:
         out.append({"s": s.start, "e": s.end, "t": s.text.strip(),
@@ -117,6 +130,8 @@ def pipeline(jid, src, opt):
                 with urllib.request.urlopen(opt["source_url"], timeout=120) as r, open(src, "wb") as f:
                     shutil.copyfileobj(r, f, 1 << 20)
             st(5, "Analyse de la vidéo…"); w, h, dur = probe(src)
+            if dur > 3 * 3600: raise RuntimeError("Vidéo trop longue (maximum 3 h).")
+            if dur < 15: raise RuntimeError("Vidéo trop courte (minimum 15 s).")
             st(10, "Extraction audio…"); wav = d / "a.wav"
             run(["ffmpeg","-y","-i",str(src),"-vn","-ac","1","-ar","16000",str(wav)])
             st(15, "Transcription IA (Whisper)…"); segs, lg = transcribe(wav)
@@ -157,6 +172,8 @@ def health(): return {"ok": True}
 @app.post("/api/jobs", dependencies=[Depends(auth)])
 async def create(file: UploadFile | None = File(None), source_url: str = Form(""), n: int = Form(6), mn: int = Form(20), mx: int = Form(60),
                  lang: str = Form("English"), platform: str = Form("TikTok / Reels / Shorts")):
+    if sum(1 for j in JOBS.values() if j["status"] == "running") >= 5:
+        raise HTTPException(429, "File d'attente pleine, réessayez dans quelques minutes.")
     jid = uuid.uuid4().hex[:10]; d = ROOT / jid; d.mkdir(parents=True)
     if source_url:
         src = d / "source.mp4"
